@@ -1,47 +1,42 @@
-# E:\SuperchainBot\config\config.py
+# SuperchainBot\config\config.py
 import os
-import logging
 from web3 import Web3
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+def load_wallets():
+    wallets = []
+    wallet_file = os.path.join(os.path.dirname(__file__), "..", "data", "wallets.txt")
+    if not os.path.exists(wallet_file):
+        raise FileNotFoundError(f"Wallets file not found: {wallet_file}")
+    w3 = Web3()
+    with open(wallet_file, "r") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                if ":" in line:
+                    private_key, address = line.split(":")
+                else:
+                    private_key = line
+                    try:
+                        account = w3.eth.account.from_key(private_key)
+                        address = account.address
+                    except Exception as e:
+                        print(f"Invalid private key {private_key[:10]}...: {str(e)}")
+                        continue
+                wallets.append({"private_key": private_key, "address": address})
+    if not wallets:
+        raise ValueError("No valid wallets found in wallets.txt")
+    return wallets
 
-def load_wallets_and_proxies():
-    wallets_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'wallets.txt')
-    proxies_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'proxies.txt')
-    wallet_proxy_pairs = []
+def load_proxies():
+    proxies = []
+    proxy_file = os.path.join(os.path.dirname(__file__), "..", "data", "proxies.txt")
+    if os.path.exists(proxy_file):
+        with open(proxy_file, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    proxies.append(line)
+    return proxies
 
-    try:
-        with open(wallets_file, 'r', encoding='utf-8') as wf:
-            wallets = [line.strip() for line in wf if line.strip()]
-
-        with open(proxies_file, 'r', encoding='utf-8') as pf:
-            proxies = [line.strip() for line in pf if line.strip()]
-
-        for i in range(min(len(wallets), len(proxies))):
-            private_key = wallets[i]
-            proxy = proxies[i]
-            if private_key and proxy:
-                try:
-                    w3 = Web3()
-                    account = w3.eth.account.from_key(private_key)
-                    address = account.address
-                    proxy_display = proxy.split(':')[:2]  # Берем только host:port
-                    proxy_display = ':'.join(proxy_display)
-                    wallet_proxy_pairs.append((private_key, proxy, address))
-                    logger.info(f"Loaded pair: wallet={address[:10]}..., proxy={proxy_display}")
-                except Exception as e:
-                    logger.warning(f"Skipping line {i+1}: Invalid private key, error={str(e)}")
-            else:
-                logger.warning(f"Skipping line {i+1}: wallet={'empty' if not private_key else 'valid'}, proxy={'empty' if not proxy else proxy}")
-
-        if not wallet_proxy_pairs:
-            logger.error("No valid wallet-proxy pairs found")
-        return wallet_proxy_pairs
-
-    except FileNotFoundError as e:
-        logger.error(f"File not found: {e}")
-        return []
-    except Exception as e:
-        logger.error(f"Error reading wallets/proxies: {e}")
-        return []
+WALLETS = load_wallets()
+PROXIES = load_proxies()
