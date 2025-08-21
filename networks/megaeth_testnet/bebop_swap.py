@@ -1,4 +1,4 @@
-# E:\SuperchainBot\networks\megaeth_testnet\bebop_swap.py
+# networks/megaeth_testnet/bebop_swap.py
 from web3 import Web3
 from config.chains import CHAINS
 import logging
@@ -84,47 +84,49 @@ def get_account_info(w3, wallet_private_key):
     weth_balance = weth_contract.functions.balanceOf(address).call()
     balance_weth = float(w3.from_wei(weth_balance, 'ether'))
     nonce = w3.eth.get_transaction_count(address)
-    return address, balance_eth, weth_balance, nonce
+    return address, balance_eth, balance_weth, nonce
 
-async def sign_and_send_transaction(w3, tx, wallet_private_key, operation_name="transaction"):
+async def sign_and_send_transaction(w3, tx, wallet_private_key, address, operation_name="transaction"):
     try:
         gas_estimate = w3.eth.estimate_gas(tx)
         tx["gas"] = int(gas_estimate * 1.2)
         tx["gasPrice"] = 1250  # 0.00125 Gwei
-        logger.info(f"Estimated gas for {operation_name}: {tx['gas']}, gasPrice: {w3.from_wei(tx['gasPrice'], 'gwei')} Gwei")
+        logger.info(f"Estimated gas for {operation_name} (wallet {address[:10]}...): {tx['gas']}, gasPrice: {w3.from_wei(tx['gasPrice'], 'gwei')} Gwei")
         signed_tx = w3.eth.account.sign_transaction(tx, wallet_private_key)
         tx_hash = w3.eth.send_raw_transaction(signed_tx.rawTransaction)
         tx_hash_hex = tx_hash.hex()
         explorer_link = f"{CHAINS['megaeth_testnet']['explorer']}/{tx_hash_hex}"
-        logger.info(f"{operation_name} sent: {explorer_link}")
+        logger.info(f"{operation_name} sent (wallet {address[:10]}...): {explorer_link}")
         receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
         if receipt["status"] == 1:
-            logger.info(f"{operation_name} successful: {explorer_link}")
+            logger.info(f"{operation_name} successful (wallet {address[:10]}...): {explorer_link}")
             return receipt
         else:
-            logger.error(f"{operation_name} failed: {explorer_link}")
+            logger.error(f"{operation_name} failed (wallet {address[:10]}...): {explorer_link}")
             return None
     except Exception as e:
-        logger.error(f"Error in {operation_name}: {str(e)}")
+        logger.error(f"Error in {operation_name} (wallet {address[:10]}...): {str(e)}")
         return None
 
-async def bebop_swap(wallet_private_key, chain_name="megaeth_testnet", operation="wrap", simulate=True):
+async def bebop_swap(wallet_private_key, chain_name="megaeth_testnet", operation="wrap", simulate=True, proxy=None):
+    address = Web3().eth.account.from_key(wallet_private_key).address  # Получаем адрес сразу
     try:
-        w3 = initialize_web3(chain_name, proxy=None)
+        w3 = initialize_web3(chain_name, proxy)
         address, balance_eth, balance_weth, nonce = get_account_info(w3, wallet_private_key)
-        logger.info(f"Balance for {address}: {balance_eth} ETH, {balance_weth} WETH")
+        logger.info(f"Balance for wallet {address[:10]}...: {balance_eth} ETH, {balance_weth} WETH")
 
         weth_contract = w3.eth.contract(address=WETH_CONTRACT, abi=WETH_ABI)
+        gas_reserve = 0.0001  # Резерв 0.0001 ETH для газа
 
         if operation == "wrap":
-            if balance_eth < 0.00015:
-                return {"status": "error", "message": f"Insufficient ETH balance ({balance_eth} ETH) for {address}"}
-            swap_percentage = random.uniform(0.05, 0.15)
-            amount_eth = int(balance_eth * swap_percentage * 10**18)
-            amount_eth = min(amount_eth, int(balance_eth * 0.5 * 10**18))  # Max 50%
-            logger.info(f"Selected {swap_percentage*100:.2f}% of ETH balance: {w3.from_wei(amount_eth, 'ether')} ETH")
+            if balance_eth < gas_reserve + 0.00015:
+                return {"status": "error", "message": f"Insufficient ETH balance ({balance_eth} ETH) for wallet {address[:10]}..."}
+            swap_percentage = random.uniform(0.01, 0.30)  # 1–30%
+            amount_eth = int((balance_eth - gas_reserve) * swap_percentage * 10**18)
+            amount_eth = min(amount_eth, int((balance_eth - gas_reserve) * 0.5 * 10**18))  # Max 50%
+            logger.info(f"Selected {swap_percentage*100:.2f}% of ETH balance: {w3.from_wei(amount_eth, 'ether')} ETH for wallet {address[:10]}...")
             if amount_eth < 10**10:
-                return {"status": "error", "message": f"Amount too low: {w3.from_wei(amount_eth, 'ether')} ETH"}
+                return {"status": "error", "message": f"Amount too low: {w3.from_wei(amount_eth, 'ether')} ETH for wallet {address[:10]}..."}
             tx = weth_contract.functions.deposit().build_transaction({
                 "from": address,
                 "value": amount_eth,
@@ -134,14 +136,40 @@ async def bebop_swap(wallet_private_key, chain_name="megaeth_testnet", operation
                 "chainId": CHAINS[chain_name]["chain_id"]
             })
             if simulate:
-                return {"status": "success", "message": f"Simulated wrap {w3.from_wei(amount_eth, 'ether')} ETH for {address}"}
-            receipt = await sign_and_send_transaction(w3, tx, wallet_private_key, f"Wrap ETH -> WETH")
+                return {"status": "success", "message": f"Simulated wrap {w3.from_wei(amount_eth, 'ether')} ETH for wallet {address[:10]}..."}
+            # Реалистичная задержка перед отправкой транзакции (1–5 секунд)
+            await asyncio.sleep(random.uniform(1, 5))
+            receipt = await sign_and_send_transaction(w3, tx, wallet_private_key, address, f"Wrap ETH -> WETH")
             return {"status": "success" if receipt and receipt["status"] == 1 else "error",
-                    "message": f"Wrap {w3.from_wei(amount_eth, 'ether')} ETH {'successful' if receipt and receipt['status'] == 1 else 'failed'} for {address}, tx hash: {receipt['transactionHash'].hex() if receipt else 'N/A'}"}
+                    "message": f"Wrap {w3.from_wei(amount_eth, 'ether')} ETH {'successful' if receipt and receipt['status'] == 1 else 'failed'} for wallet {address[:10]}..., tx hash: {receipt['transactionHash'].hex() if receipt else 'N/A'}"}
 
         elif operation == "unwrap":
             if balance_weth < 0.0001:
-                return {"status": "error", "message": f"Insufficient WETH balance ({balance_weth} WETH) for {address}"}
-            swap_percentage = random.uniform(0.05, 0.15)
+                return {"status": "error", "message": f"Insufficient WETH balance ({balance_weth} WETH) for wallet {address[:10]}..."}
+            swap_percentage = random.uniform(0.01, 0.30)  # 1–30%
             amount_weth = int(balance_weth * swap_percentage * 10**18)
-            amount_weth = min(amount_weth, int(balance_weth * 0.5 * 10
+            amount_weth = min(amount_weth, int(balance_weth * 0.5 * 10**18))  # Max 50%
+            logger.info(f"Selected {swap_percentage*100:.2f}% of WETH balance: {w3.from_wei(amount_weth, 'ether')} WETH for wallet {address[:10]}...")
+            if amount_weth < 10**10:
+                return {"status": "error", "message": f"Amount too low: {w3.from_wei(amount_weth, 'ether')} WETH for wallet {address[:10]}..."}
+            tx = weth_contract.functions.withdraw(amount_weth).build_transaction({
+                "from": address,
+                "gas": 100000,
+                "gasPrice": 1250,
+                "nonce": nonce,
+                "chainId": CHAINS[chain_name]["chain_id"]
+            })
+            if simulate:
+                return {"status": "success", "message": f"Simulated unwrap {w3.from_wei(amount_weth, 'ether')} WETH for wallet {address[:10]}..."}
+            # Реалистичная задержка перед отправкой транзакции (1–5 секунд)
+            await asyncio.sleep(random.uniform(1, 5))
+            receipt = await sign_and_send_transaction(w3, tx, wallet_private_key, address, f"Unwrap WETH -> ETH")
+            return {"status": "success" if receipt and receipt["status"] == 1 else "error",
+                    "message": f"Unwrap {w3.from_wei(amount_weth, 'ether')} WETH {'successful' if receipt and receipt['status'] == 1 else 'failed'} for wallet {address[:10]}..., tx hash: {receipt['transactionHash'].hex() if receipt else 'N/A'}"}
+
+        else:
+            return {"status": "error", "message": f"Unsupported operation: {operation} for wallet {address[:10]}..."}
+
+    except Exception as e:
+        logger.error(f"Bebop swap failed for wallet {address[:10]}...: {str(e)}")
+        return {"status": "error", "message": str(e)}

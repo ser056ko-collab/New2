@@ -1,10 +1,11 @@
-# networks/megaeth_testnet/unwrap.py
+# SuperchainBot\networks\megaeth_testnet\unwrap.py
 from web3 import Web3
-from config.chains import CHAINS
-from config.network_configs import NETWORK_CONFIGS
 import logging
 import random
-import time
+import asyncio
+from config.chains import CHAINS
+from config.network_configs import NETWORK_CONFIGS
+from .gte_swap import initialize_web3, get_account_info, sign_and_send_transaction
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -17,7 +18,6 @@ WETH_ABI = [
         "inputs": [{"name": "wad", "type": "uint256"}],
         "name": "withdraw",
         "outputs": [],
-        "payable": False,
         "stateMutability": "nonpayable",
         "type": "function"
     },
@@ -30,77 +30,44 @@ WETH_ABI = [
     }
 ]
 
-_web3_cache = {}
-
-def initialize_web3(chain_name, proxy=None):
-    if chain_name in _web3_cache:
-        return _web3_cache[chain_name]
-    start_time = time.time()
-    chain = CHAINS.get(chain_name)
-    if not chain:
-        raise ValueError(f"Chain {chain_name} not supported")
-    w3 = Web3(Web3.HTTPProvider(chain["rpc"]))
-    if not w3.is_connected():
-        raise ConnectionError(f"Failed to connect to {chain_name} RPC")
-    _web3_cache[chain_name] = w3
-    logger.info(f"Web3 initialized for {chain_name} in {time.time() - start_time:.2f} seconds")
-    return w3
-
-def get_account_info(w3, wallet_private_key):
-    account = w3.eth.account.from_key(wallet_private_key)
-    address = account.address
-    balance = w3.eth.get_balance(address)
-    balance_eth = float(w3.from_wei(balance, 'ether'))
-    nonce = w3.eth.get_transaction_count(address)
-    weth_contract = w3.eth.contract(address=WETH_CONTRACT, abi=WETH_ABI)
-    weth_balance_wei = weth_contract.functions.balanceOf(address).call()
-    weth_balance = weth_balance_wei / 10**18
-    return address, balance_eth, nonce, weth_balance
-
-async def unwrap_eth(wallet_private_key, chain_name="megaeth_testnet", simulate=True):
+async def unwrap_eth(wallet_private_key, address, chain_name="megaeth_testnet", simulate=False, proxy=None):
     try:
-        w3 = initialize_web3(chain_name)
-        address, balance_eth, nonce, weth_balance = get_account_info(w3, wallet_private_key)
-        logger.info(f"Balance for {address}: {balance_eth} ETH, WETH: {weth_balance}")
-
-        # Берем 5–15% от баланса WETH
-        swap_percentage = random.uniform(
-            NETWORK_CONFIGS[chain_name]["percentage_range"][0],
-            NETWORK_CONFIGS[chain_name]["percentage_range"][1]
-        ) / 100
-        amount_weth = weth_balance * swap_percentage
-        amount_weth = round(amount_weth, 8)
-        if amount_weth < 0.00000001:
-            amount_weth = 0.00000001
-        logger.info(f"Selected {swap_percentage*100:.2f}% of WETH balance: {amount_weth} WETH")
-
-        if weth_balance < amount_weth:
-            return {"status": "error", "message": f"Insufficient WETH balance ({weth_balance} WETH) for {address}"}
-
+        w3 = initialize_web3(chain_name, proxy, simulate)
+        balance_eth, nonce, _ = get_account_info(w3, address, simulate)
         weth_contract = w3.eth.contract(address=WETH_CONTRACT, abi=WETH_ABI)
-        amount_wei = w3.to_wei(amount_weth, 'ether')
-        tx = weth_contract.functions.withdraw(amount_wei).build_transaction({
-            'from': address,
-            'value': 0,
-            'gas': 100000,
-            'gasPrice': w3.eth.gas_price,
-            'nonce': nonce,
-            'chainId': CHAINS[chain_name]["chain_id"]
+        weth_balance = weth_contract.functions.balanceOf(address).call()
+        weth_balance_eth = float(w3.from_wei(weth_balance, 'ether'))
+        logger.info(f"Balance for wallet {address[:10]}...: {balance_eth:.6f} ETH, {weth_balance_eth:.6f} WETH")
+
+        gas_reserve = 0.0001
+        if balance_eth < gas_reserve:
+            return {"status": "error", "message": f"Insufficient ETH balance ({balance_eth:.6f} ETH) for wallet {address[:10]}..."}
+
+        if weth_balance_eth == 0:
+            return {"status": "error", "message": f"No WETH balance for wallet {address[:10]}..."}
+
+        swap_percentage = random.uniform(*NETWORK_CONFIGS[chain_name]["percentage_range"]) / 100
+        amount_weth = int(weth_balance_eth * swap_percentage * 10**18)
+        amount_weth = min(amount_weth, int(weth_balance_eth * 0.5 * 10**18))
+        logger.info(f"Selected {swap_percentage*100:.2f}% of WETH balance: {w3.from_wei(amount_weth, 'ether'):.6f} WETH for wallet {address[:10]}...")
+
+        if amount_weth < 10**10:
+            return {"status": "error", "message": f"Amount too low: {w3.from_wei(amount_weth, 'ether'):.6f} WETH for wallet {address[:10]}..."}
+
+        tx = weth_contract.functions.withdraw(amount_weth).build_transaction({
+            "from": address,
+            "gas": 100000,
+            "gasPrice": w3.eth.gas_price if not simulate else 1250,
+            "nonce": nonce,
+            "chainId": CHAINS[chain_name]["chain_id"]
         })
 
-        signed_tx = w3.eth.account.sign_transaction(tx, wallet_private_key)
-        if simulate:
-            logger.info(f"Simulated unwrap for {address}: {signed_tx.hash.hex()}")
-            return {"status": "success", "message": f"Unwrap {amount_weth} WETH prepared for {address}, tx hash: {signed_tx.hash.hex()}"}
+        await asyncio.sleep(random.uniform(1, 5))
+        receipt = await sign_and_send_transaction(w3, tx, wallet_private_key, address, "Unwrap WETH", simulate)
+        if receipt and receipt["status"] == 1:
+            return {"status": "success", "message": f"Unwrapped {w3.from_wei(amount_weth, 'ether'):.6f} WETH for wallet {address[:10]}..."}
         else:
-            tx_hash = w3.eth.send_raw_transaction(signed_tx.rawTransaction)
-            receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
-            if receipt["status"] == 1:
-                logger.info(f"Unwrap successful: {tx_hash.hex()}")
-                return {"status": "success", "message": f"Unwrap {amount_weth} WETH successful for {address}, tx hash: {tx_hash.hex()}"}
-            else:
-                logger.error(f"Unwrap failed: {tx_hash.hex()}")
-                return {"status": "error", "message": f"Unwrap failed: {tx_hash.hex()}"}
+            return {"status": "error", "message": f"Failed to unwrap {w3.from_wei(amount_weth, 'ether'):.6f} WETH for wallet {address[:10]}..."}
     except Exception as e:
-        logger.error(f"Unwrap failed: {str(e)}")
+        logger.error(f"Unwrap failed for wallet {address[:10]}...: {str(e)}")
         return {"status": "error", "message": str(e)}
